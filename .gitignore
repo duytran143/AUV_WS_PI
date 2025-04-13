@@ -1,0 +1,4 @@
+# Loại bỏ các thư mục build, install và log
+build/
+install/
+log/
