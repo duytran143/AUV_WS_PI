@@ -21,6 +21,8 @@ setup(
     entry_points={
         'console_scripts': [
             'joystick_input_node = auv_controller.joystick_input_node:main',
+            'sensor_node = auv_controller.sensor_node:main',
+            'command_processor_node = auv_controller.command_processor_node:main',
         ],
     },
 )
