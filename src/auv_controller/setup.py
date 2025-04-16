@@ -1,6 +1,6 @@
 from setuptools import find_packages, setup
 
-package_name = 'AUV_controller'
+package_name = 'auv_controller'
 
 setup(
     name=package_name,
@@ -20,6 +20,7 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
+            'joystick_input_node = auv_controller.joystick_input_node:main',
         ],
     },
 )
