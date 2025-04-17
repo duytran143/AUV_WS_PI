@@ -23,6 +23,7 @@ setup(
             'joystick_input_node = auv_controller.joystick_input_node:main',
             'sensor_node = auv_controller.sensor_node:main',
             'command_processor_node = auv_controller.command_processor_node:main',
+            'camera_stream_node     = auv_controller.camera_stream_node:main',
         ],
     },
 )

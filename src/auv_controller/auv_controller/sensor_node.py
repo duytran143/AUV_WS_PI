@@ -13,7 +13,7 @@ class SensorNode(Node):
         
         # Mở cổng serial (ví dụ: /dev/ttyUSB0) với tốc độ 115200 baud, timeout 1 giây.
         try:
-            self.ser = serial.Serial('/dev/ttyUSB0', 115200, timeout=1)
+            self.ser = serial.Serial('/dev/ttyUSB0', 115200, timeout=0.05)
             time.sleep(0.5)  # Cho Serial ổn định
             self.get_logger().info("Serial port /dev/ttyUSB0 opened at 115200 baud.")
         except Exception as e:
@@ -22,7 +22,7 @@ class SensorNode(Node):
             return
         
         # Tạo timer gọi hàm timer_callback mỗi 0.1 giây
-        self.timer = self.create_timer(0.1, self.timer_callback)
+        self.timer = self.create_timer(0.01, self.timer_callback)
 
     def timer_callback(self):
         try:
