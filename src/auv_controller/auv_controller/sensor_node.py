@@ -1,76 +1,107 @@
 #!/usr/bin/env python3
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import String
+from geometry_msgs.msg import Vector3Stamped
+from std_msgs.msg import Int32, Float32
 import serial
 import time
+import sys
 
 class SensorNode(Node):
     def __init__(self):
         super().__init__('sensor_node')
-        # Publisher để gửi dữ liệu cảm biến lên topic 'sensor_data'
-        self.publisher_ = self.create_publisher(String, 'sensor_data', 10)
-        
-        # Mở cổng serial (ví dụ: /dev/ttyUSB0) với tốc độ 115200 baud, timeout 1 giây.
+        # Publishers
+        self.gyro_pub   = self.create_publisher(Vector3Stamped, 'gyro', 10)
+        self.accel_pub  = self.create_publisher(Vector3Stamped, 'accel', 10)
+        self.euler_pub  = self.create_publisher(Vector3Stamped, 'imu/euler', 10)
+        self.p1_pub     = self.create_publisher(Int32, 'proximity1', 10)
+        self.p2_pub     = self.create_publisher(Int32, 'proximity2', 10)
+        self.depth_pub  = self.create_publisher(Float32, 'depth', 10)
+
+        # Serial port setup
         try:
             self.ser = serial.Serial('/dev/ttyUSB0', 115200, timeout=0.05)
-            time.sleep(0.5)  # Cho Serial ổn định
-            self.get_logger().info("Serial port /dev/ttyUSB0 opened at 115200 baud.")
+            time.sleep(0.5)
+            self.get_logger().info("Serial opened at 115200 baud.")
         except Exception as e:
-            self.get_logger().error(f"Failed to open serial port: {e}")
+            self.get_logger().error(f"Serial open failed: {e}")
             rclpy.shutdown()
             return
-        
-        # Tạo timer gọi hàm timer_callback mỗi 0.1 giây
-        self.timer = self.create_timer(0.01, self.timer_callback)
+
+        # Timer (~20 Hz)
+        self.create_timer(0.01, self.timer_callback)
+        # Set logger level to WARN to suppress info logs during loop
+        self.get_logger().set_level(rclpy.logging.LoggingSeverity.WARN)
 
     def timer_callback(self):
-        try:
-            # Đọc một dòng từ serial (kết thúc bằng newline)
-            line = self.ser.readline().decode('utf-8', errors='ignore').strip()
-            if not line:
-                return  # Nếu không có dữ liệu, bỏ qua
+        line = self.ser.readline().decode('utf-8', errors='ignore').strip()
+        if not line:
+            return
 
-            # Giả sử dữ liệu có dạng:
-            # "gyroX gyroY gyroZ roll pitch yaw prox1 prox2 depth"
-            fields = line.split()
-            if len(fields) != 9:
-                self.get_logger().warn(f"Invalid format: {line}")
-                return
+        parts = line.split()
+        if len(parts) != 12:
+            self.get_logger().warn(f"Expected 12 fields, got {len(parts)}: '{line}'")
+            return
 
-            try:
-                # Ép kiểu các trường ra float
-                gyroX = float(fields[0])
-                gyroY = float(fields[1])
-                gyroZ = float(fields[2])
-                roll  = float(fields[3])
-                pitch = float(fields[4])
-                yaw   = float(fields[5])
-                prox1 = float(fields[6])
-                prox2 = float(fields[7])
-                depth = float(fields[8])
-            except ValueError as e:
-                self.get_logger().warn(f"Parse error: {e} for line: {line}")
-                return
+        # Parse values
+        gx, gy, gz       = map(float, parts[0:3])
+        ax, ay, az       = map(float, parts[3:6])
+        roll, pitch, yaw = map(float, parts[6:9])
+        p1, p2           = map(int,   parts[9:11])
+        depth            = float(parts[11])
 
-            # Định dạng dữ liệu thành chuỗi để publish (có thể sau này chuyển thành custom message)
-            sensor_str = (f"Gyro:({gyroX:.2f}, {gyroY:.2f}, {gyroZ:.2f}) "
-                          f"Euler:({roll:.2f}, {pitch:.2f}, {yaw:.2f}) "
-                          f"Proxi:({prox1:.0f} mm, {prox2:.0f} mm) "
-                          f"Depth:{depth:.2f}")
-            msg = String()
-            msg.data = sensor_str
+        now = self.get_clock().now().to_msg()
 
-            # Publish lên topic 'sensor_data'
-            self.publisher_.publish(msg)
-            self.get_logger().info(f"Published sensor data: {sensor_str}")
-        except Exception as e:
-            self.get_logger().error(f"Error in timer_callback: {e}")
+        # Publish gyro
+        gyro_msg = Vector3Stamped()
+        gyro_msg.header.stamp = now
+        gyro_msg.header.frame_id = 'imu_link'
+        gyro_msg.vector.x = gx
+        gyro_msg.vector.y = gy
+        gyro_msg.vector.z = gz
+        self.gyro_pub.publish(gyro_msg)
+
+        # Publish accel
+        accel_msg = Vector3Stamped()
+        accel_msg.header.stamp = now
+        accel_msg.header.frame_id = 'imu_link'
+        accel_msg.vector.x = ax
+        accel_msg.vector.y = ay
+        accel_msg.vector.z = az
+        self.accel_pub.publish(accel_msg)
+
+        # Publish euler
+        euler_msg = Vector3Stamped()
+        euler_msg.header.stamp = now
+        euler_msg.header.frame_id = 'imu_link'
+        euler_msg.vector.x = roll
+        euler_msg.vector.y = pitch
+        euler_msg.vector.z = yaw
+        self.euler_pub.publish(euler_msg)
+
+        # Publish proximity
+        self.p1_pub.publish(Int32(data=p1))
+        self.p2_pub.publish(Int32(data=p2))
+
+        # Publish depth
+        self.depth_pub.publish(Float32(data=depth))
+
+        # Single-line console output with fixed-width fields
+        log_line = (
+            f"Gyro: {gx:7.2f} {gy:7.2f} {gz:7.2f} | "
+            f"Acc : {ax:7.2f} {ay:7.2f} {az:7.2f} | "
+            f"Ang : {roll:7.2f} {pitch:7.2f} {yaw:7.2f} | "
+            f"P1:{p1:3d} P2:{p2:3d} | "
+            f"D :{depth:4.2f}"
+        )
+        sys.stdout.write('\r' + log_line)
+        sys.stdout.flush()
 
     def destroy_node(self):
-        # Đóng cổng serial khi node bị dừng
-        self.ser.close()
+        if hasattr(self, 'ser'):
+            self.ser.close()
         super().destroy_node()
+
 
 def main(args=None):
     rclpy.init(args=args)
@@ -78,7 +109,7 @@ def main(args=None):
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
-        node.get_logger().info("Keyboard Interrupt (SIGINT) detected.")
+        pass
     finally:
         node.destroy_node()
         rclpy.shutdown()

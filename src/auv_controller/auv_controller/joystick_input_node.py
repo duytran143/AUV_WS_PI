@@ -1,71 +1,128 @@
 #!/usr/bin/env python3
 import rclpy
 from rclpy.node import Node
+from sensor_msgs.msg import Joy
 import socket
 import threading
-from std_msgs.msg import String  # Bạn có thể thay thế bằng message tùy chỉnh sau
+import sys
+import time
+
+RECONNECT_DELAY = 1.0  # seconds
 
 class JoystickInputNode(Node):
     def __init__(self):
         super().__init__('joystick_input_node')
-        # Tạo publisher cho dữ liệu joystick
-        self.publisher_ = self.create_publisher(String, 'joystick_data', 10)
-        
-        # Cấu hình server để nhận dữ liệu điều khiển từ Windows (hoặc từ tay cầm)
-        self.host = "192.168.2.2"  # Địa chỉ tĩnh của Raspberry Pi (cho server)
-        self.port = 5000         # Cổng lắng nghe
+
+        # Publisher Joy message on /joy
+        self.joy_pub = self.create_publisher(Joy, 'joy', 10)
+
+        # Setup TCP server for joystick input
+        self.host = '0.0.0.0'
+        self.port = 5000
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        # Cho phép tái sử dụng cổng
         self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             self.server_socket.bind((self.host, self.port))
             self.server_socket.listen(1)
-            self.get_logger().info(f"Listening on {self.host}:{self.port} ...")
+            # Suppress info logs to avoid line breaks during console updates
+            self.get_logger().set_level(rclpy.logging.LoggingSeverity.WARN)
+            self.get_logger().info(f"Listening for joystick on {self.host}:{self.port}")
         except Exception as e:
-            self.get_logger().error(f"Failed to bind server socket: {e}")
+            self.get_logger().error(f"Failed to bind joystick socket: {e}")
             rclpy.shutdown()
             return
-        
-        self.conn = None  # Kết nối client
-        # Khởi động thread để chấp nhận kết nối và nhận dữ liệu
-        self.listen_thread = threading.Thread(target=self.listen_for_connection, daemon=True)
-        self.listen_thread.start()
-    
-    def listen_for_connection(self):
-        try:
-            self.conn, addr = self.server_socket.accept()
-            self.get_logger().info(f"Accepted connection from {addr}")
-            self.receive_loop()
-        except Exception as e:
-            self.get_logger().error(f"Error accepting connection: {e}")
-    
-    def receive_loop(self):
+
+        # Start accept loop in background
+        threading.Thread(target=self.accept_loop, daemon=True).start()
+
+    def accept_loop(self):
+        """
+        Continuously accept connections. If a connection drops or fails, retry after delay.
+        """
         while rclpy.ok():
             try:
-                data = self.conn.recv(1024).decode().strip()
-                if not data:
-                    continue
-                # Publish dữ liệu nhận được
-                msg = String()
-                msg.data = data
-                self.publisher_.publish(msg)
-                self.get_logger().info(f"Received joystick data: {data}")
+                conn, addr = self.server_socket.accept()
+                self.get_logger().info(f"Joystick connected from {addr}")
+                self.receive_loop(conn)
             except Exception as e:
-                self.get_logger().error(f"Error receiving data: {e}")
-                break
+                self.get_logger().error(f"Error accepting connection: {e}. Retrying in {RECONNECT_DELAY}s...")
+                time.sleep(RECONNECT_DELAY)
+
+    def receive_loop(self, conn):
+        """
+        Receive data until connection is lost.
+        On exception or disconnect, return to accept_loop.
+        """
+        with conn:
+            while rclpy.ok():
+                try:
+                    data = conn.recv(1024).decode().strip()
+                    if not data:
+                        continue
+                except Exception as e:
+                    self.get_logger().warn(f"Receive failed: {e}. Waiting for new connection.")
+                    return
+
+                parts = data.split()
+                if len(parts) < 8:
+                    continue
+
+                # Parse axes (first 8 values)
+                try:
+                    axes = [float(v) for v in parts[:8]]
+                except ValueError:
+                    continue
+
+                # Parse buttons: support concatenated or space-separated
+                buttons = []
+                if len(parts) == 9:
+                    raw = parts[8]
+                    for c in raw:
+                        if c in ('0', '1'):
+                            buttons.append(int(c))
+                else:
+                    try:
+                        buttons = [int(b) for b in parts[8:]]
+                    except ValueError:
+                        continue
+
+                # Publish Joy message
+                joy_msg = Joy()
+                joy_msg.header.stamp = self.get_clock().now().to_msg()
+                joy_msg.header.frame_id = 'joystick'
+                joy_msg.axes = axes
+                joy_msg.buttons = buttons
+                self.joy_pub.publish(joy_msg)
+
+                # Single-line console log with fixed-width fields
+                line = (
+                    f"Axes: {axes[0]:6.2f} {axes[1]:6.2f} | "
+                    f"{axes[2]:6.2f} {axes[3]:6.2f} | "
+                    f"Tri: {axes[4]:6.2f} {axes[5]:6.2f} | "
+                    f"Hat: {int(axes[6]):2d},{int(axes[7]):2d} | "
+                    f"Btns: {' '.join(str(b) for b in buttons)}"
+                )
+                sys.stdout.write('\r' + line)
+                sys.stdout.flush()
 
     def destroy_node(self):
-        if self.conn:
-            self.conn.close()
-        self.server_socket.close()
+        try:
+            self.server_socket.close()
+        except:
+            pass
         super().destroy_node()
+
 
 def main(args=None):
     rclpy.init(args=args)
     node = JoystickInputNode()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
