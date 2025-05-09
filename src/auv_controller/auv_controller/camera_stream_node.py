@@ -13,7 +13,7 @@ import time
 HOST_IP      = '192.168.2.1'   # IP Windows client
 PORT         = 5001
 CHUNK_SIZE   = 65507           # bytes mỗi gói UDP
-JPEG_QUALITY = 60              # chất lượng JPEG
+JPEG_QUALITY = 40              # chất lượng JPEG
 WIDTH,HEIGHT = 960, 540        # độ phân giải
 FPS          = 40
 
