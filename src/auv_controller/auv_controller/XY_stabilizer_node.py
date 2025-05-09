@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """
-XY_stabilizer_node.py  —  ROS 2 node for velocity‑based control of a 4‑vectored‑thruster ROV
+XY_stabilizer_node.py — ROS 2 node for surge/heave user control + yaw stabilization + thruster allocation
 
-* Map joystick axes → desired surge / sway velocity (m/s) & yaw‑rate (rad/s)
-* Estimate body‑frame velocity from accelerometer only (gravity compensation, bias tracking,
-  higher‑cutoff LPF, leaky integrator + adaptive leak + ZUPT)
-* Run PID control on velocity errors (surge, sway) and yaw‑rate error → forces Fx, Fy, Mz
-* Publish Fx, Fy, Mz on `/force_cmds`
-* Log filtered accel (x,y), gyro-z, estimated vel, and force cmds on one aligned line
+* Subscribe to /joy (sensor_msgs/Joy) for joystick inputs:
+    - axes[0] → surge force command (Fx)
+    - axes[1] → heave force command (Fy)
+    - axes[2] → yaw-axis for stabilization
+* Subscribe to /gyro (geometry_msgs/Vector3Stamped) for measured yaw-rate
+* Compute yaw torque Mz via PID on yaw-rate error
+* Allocate wrench [Fx, Fy, Mz] to N thrusters based on geometry
+* Publish individual thruster forces (std_msgs/Float32MultiArray) on /thruster_cmds
+* Log Fx, Fy, wz_user, wz_meas, Mz and thruster forces on one line
 """
-
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Joy
@@ -17,131 +19,107 @@ from geometry_msgs.msg import Vector3Stamped
 from std_msgs.msg import Float32MultiArray
 import numpy as np
 
-class PID:
-    def __init__(self, kp, ki, kd, integral_limit=None):
-        self.kp = kp
-        self.ki = ki
-        self.kd = kd
-        self.integral = 0.0
-        self.prev_error = 0.0
-        self.integral_limit = integral_limit
+def clamp(x, min_val, max_val):
+    return max(min(x, max_val), min_val)
 
-    def __call__(self, error, dt):
-        self.integral += error * dt
-        if self.integral_limit is not None:
-            self.integral = np.clip(self.integral, -self.integral_limit, self.integral_limit)
+class PID:
+    def __init__(self, Kp, Ki, Kd, integrator_max=1.0, integrator_min=-1.0):
+        self.Kp = Kp
+        self.Ki = Ki
+        self.Kd = Kd
+        self.integrator = 0.0
+        self.prev_error = 0.0
+        self.int_max = integrator_max
+        self.int_min = integrator_min
+
+    def compute(self, error, dt):
+        self.integrator += error * dt
+        self.integrator = clamp(self.integrator, self.int_min, self.int_max)
         derivative = (error - self.prev_error) / dt if dt > 0 else 0.0
-        out = self.kp * error + self.ki * self.integral + self.kd * derivative
+        output = self.Kp * error + self.Ki * self.integrator + self.Kd * derivative
         self.prev_error = error
-        return out
+        return output
 
 class XYStabilizerNode(Node):
     CONTROL_HZ = 50.0
-    MAX_VEL = 0.6
-    MAX_YAW_RATE = 0.5
-    ZUPT_DELAY = 0.1               # shorten ZUPT wait
-    STATIONARY_ACC_THRESH = 0.15
-    LPF_ALPHA = 0.8                # higher cutoff for faster response
-    LEAK_NORMAL = 0.1              # normal slow leak
-    LEAK_IDLE = 10.0               # fast leak when stationary
+    MAX_SURGE = 10.0    # max Fx
+    MAX_HEAVE = 10.0    # max Fy
+    MAX_YAW_RATE = 0.5  # rad/s
+    DEADZONE = 0.05
+    # Thruster geometry: list of (x, y, angle) in vehicle frame
+    THRUSTERS = [
+        {'pos': ( 0.3,  0.2), 'angle': 0},   # front-right, forward
+        {'pos': (-0.3,  0.2), 'angle': 0},   # front-left, forward
+        {'pos': (-0.3, -0.2), 'angle': 0},   # rear-left, forward
+        {'pos': ( 0.3, -0.2), 'angle': 0},   # rear-right, forward
+    ]
 
     def __init__(self):
         super().__init__('XY_stabilizer_node')
-        self._vx_des = 0.0
-        self._vy_des = 0.0
-        self._wz_des = 0.0
-        self.v_est = np.zeros(3)
-        self.a_f_prev = np.zeros(3)
-        self.a_f = np.zeros(3)
-        self.bias = np.zeros(3)
-        self.yaw_rate_meas = 0.0
-        self.stationary_start = None
+        # user commands
+        self.Fx = 0.0
+        self.Fy = 0.0
+        self.wz_user = 0.0
+        # measured yaw-rate
+        self.wz_meas = 0.0
+        # PID for yaw
+        self.pid = PID(Kp=1.5, Ki=0.1, Kd=0.0, integrator_max=2.0, integrator_min=-2.0)
+        # build allocation matrix A (3×N)
+        self.A = self._build_allocation_matrix()
+        self.A_pinv = np.linalg.pinv(self.A)
 
-        self.pid_x   = PID(1.2, 0.1,   0.01, integral_limit=1.0)
-        self.pid_y   = PID(1.2, 0.1,   0.01, integral_limit=1.0)
-        self.pid_yaw = PID(1.0, 0.05, 0.005, integral_limit=0.5)
+        # subscriptions
+        self.create_subscription(Joy, '/joy', self.joy_cb, 10)
+        self.create_subscription(Vector3Stamped, '/gyro', self.gyro_cb, 10)
+        # publisher
+        self.pub = self.create_publisher(Float32MultiArray, '/thruster_cmds', 10)
+        # control timer
+        self.create_timer(1.0/self.CONTROL_HZ, self.control_loop)
+        self.get_logger().info('XY stabilizer node ready')
 
-        self.joy_sub  = self.create_subscription(Joy, '/joy', self.joy_cb, 10)
-        self.acc_sub  = self.create_subscription(Vector3Stamped, '/accel', self.accel_cb, 10)
-        self.gyro_sub = self.create_subscription(Vector3Stamped, '/gyro', self.gyro_cb, 10)
-        self.force_pub = self.create_publisher(Float32MultiArray, '/force_cmds', 10)
-
-        self.last_time = self.get_clock().now()
-        self.control_timer = self.create_timer(1.0 / self.CONTROL_HZ, self.control_loop)
-        self.get_logger().info('XY stabilizer node ready.')
+    def _build_allocation_matrix(self):
+        cols = len(self.THRUSTERS)
+        A = np.zeros((3, cols))
+        for i, th in enumerate(self.THRUSTERS):
+            theta = np.deg2rad(th['angle'])
+            ux, uy = np.cos(theta), np.sin(theta)
+            x, y = th['pos']
+            A[0, i] = ux
+            A[1, i] = uy
+            A[2, i] = x*uy - y*ux
+        return A
 
     def joy_cb(self, msg: Joy):
-        # swap axes[1]→vx, axes[0]→vy
-        self._vx_des = self.MAX_VEL * float(msg.axes[1])
-        self._vy_des = self.MAX_VEL * float(msg.axes[0])
-        self._wz_des = self.MAX_YAW_RATE * float(msg.axes[2])
-
-    def accel_cb(self, msg: Vector3Stamped):
-        # gravity remove
-        a_raw = np.array([msg.vector.x, msg.vector.y, msg.vector.z])
-        a_lin = a_raw - np.array([0, 0, 9.81])
-        norm = np.linalg.norm(a_lin)
-        # bias tracking when truly stationary
-        if norm < self.STATIONARY_ACC_THRESH:
-            if self.stationary_start is None:
-                self.stationary_start = self.get_clock().now()
-            self.bias = 0.995 * self.bias + 0.005 * a_lin
-        else:
-            self.stationary_start = None
-        # LPF
-        self.a_f = self.LPF_ALPHA * (a_lin - self.bias) + (1 - self.LPF_ALPHA) * self.a_f_prev
-        self.a_f_prev = self.a_f
-        # velocity estimation
-        now = self.get_clock().now()
-        dt = (now - self.last_time).nanoseconds * 1e-9
-        lam = self.LEAK_IDLE if norm < self.STATIONARY_ACC_THRESH else self.LEAK_NORMAL
-        # always leak
-        self.v_est = (1 - lam * dt) * self.v_est
-        # integrate only on active accel
-        if norm >= self.STATIONARY_ACC_THRESH:
-            self.v_est += self.a_f * dt
-        self.last_time = now
+        self.Fx = self.MAX_SURGE * float(msg.axes[0])
+        self.Fy = self.MAX_HEAVE * float(msg.axes[1])
+        yaw_axis = msg.axes[2]
+        self.wz_user = self.MAX_YAW_RATE * yaw_axis if abs(yaw_axis) > self.DEADZONE else 0.0
 
     def gyro_cb(self, msg: Vector3Stamped):
-        self.yaw_rate_meas = msg.vector.z
+        self.wz_meas = msg.vector.z
 
     def control_loop(self):
-        # ZUPT and reset
-        if self.stationary_start is not None:
-            elapsed = (self.get_clock().now() - self.stationary_start).nanoseconds * 1e-9
-            if elapsed >= self.ZUPT_DELAY:
-                self.v_est[0:2] = 0.0
-                self.pid_x.integral = 0.0
-                self.pid_y.integral = 0.0
-        dt = 1.0 / self.CONTROL_HZ
-        Fx = self.pid_x(self._vx_des - self.v_est[0], dt)
-        Fy = self.pid_y(self._vy_des - self.v_est[1], dt)
-        Mz = self.pid_yaw(self._wz_des - self.yaw_rate_meas, dt)
-        # publish
-        msg = Float32MultiArray(data=[Fx, Fy, Mz])
-        self.force_pub.publish(msg)
-        # log
-        fx, fy = self.a_f[0], self.a_f[1]
-        vx, vy = self.v_est[0], self.v_est[1]
-        log = (
-            f"filt=[{fx:+7.3f},{fy:+7.3f}] "
-            f"gyro={self.yaw_rate_meas:+7.3f} "
-            f"vel=[{vx:+7.3f},{vy:+7.3f}] "
-            f"Fx={Fx:+7.3f} Fy={Fy:+7.3f} Mz={Mz:+7.3f}"
+        error = self.wz_user - self.wz_meas
+        Mz = self.pid.compute(error, 1.0/self.CONTROL_HZ)
+        wrench = np.array([self.Fx, self.Fy, Mz])
+        thr_forces = self.A_pinv.dot(wrench)
+        msg = Float32MultiArray(data=thr_forces.tolist())
+        self.pub.publish(msg)
+        forces_str = ' '.join(f'{f:+6.2f}' for f in thr_forces)
+        print(
+            f"Fx={self.Fx:+6.2f} Fy={self.Fy:+6.2f} wz_user={self.wz_user:+.3f} "
+            f"wz_meas={self.wz_meas:+.3f} Mz={Mz:+6.2f} thr=[{forces_str}]",
+            end='\r', flush=True
         )
-        print(log, end='\r', flush=True)
 
 
 def main(args=None):
     rclpy.init(args=args)
     node = XYStabilizerNode()
-    try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        node.destroy_node()
-        rclpy.shutdown()
+    rclpy.spin(node)
+    node.destroy_node()
+    rclpy.shutdown()
+
 
 if __name__ == '__main__':
     main()
