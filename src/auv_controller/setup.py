@@ -29,6 +29,7 @@ setup(
             'gui_command_node     = auv_controller.gui_command_node:main',
             'XY_stabilizer_node   = auv_controller.XY_stabilizer_node:main',
             'velocity_estimator_node = auv_controller.velocity_estimator_node:main',
+            'RPH_stabilizer_node  = auv_controller.RPH_stabilizer_node:main',
         ],
     },
 )
