@@ -30,6 +30,9 @@ setup(
             'XY_stabilizer_node   = auv_controller.XY_stabilizer_node:main',
             'velocity_estimator_node = auv_controller.velocity_estimator_node:main',
             'RPH_stabilizer_node  = auv_controller.RPH_stabilizer_node:main',
+            'joystick_input_V2_node = auv_controller.joystick_input_V2_node:main',
+            'ROV_stabilizer_V1_node = auv_controller.ROV_stabilizer_V1_node:main',
+            'motor_driver_node = auv_controller.motor_driver_node:main'
         ],
     },
 )
