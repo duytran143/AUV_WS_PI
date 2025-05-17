@@ -94,7 +94,7 @@ class JoystickInputNode(Node):
                 Vz_sp = alphaVz * axes[2]
 
                 self.depth_sp += alphaD * axes[3]
-                self.depth_sp = min(max(self.depth_sp, 0.0), 10.0)
+                self.depth_sp = min(max(self.depth_sp, 0), 98)
 
                 sp_msg = Vector3Stamped()
                 sp_msg.header.stamp = self.get_clock().now().to_msg()

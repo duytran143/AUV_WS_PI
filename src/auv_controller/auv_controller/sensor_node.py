@@ -6,6 +6,7 @@ from std_msgs.msg import Int32, Float32
 import serial
 import time
 import sys
+from collections import deque
 
 class SensorNode(Node):
     def __init__(self):
@@ -17,6 +18,14 @@ class SensorNode(Node):
         self.p1_pub     = self.create_publisher(Int32, 'proximity1', 10)
         self.p2_pub     = self.create_publisher(Int32, 'proximity2', 10)
         self.depth_pub  = self.create_publisher(Float32, 'depth', 10)
+
+        # Moving average window size for depth readings
+        self.declare_parameter('depth_filter_size', 3)
+        size = self.get_parameter('depth_filter_size').value
+        if size < 1:
+            self.get_logger().warn('depth_filter_size should be >=1; defaulting to 5')
+            size = 5
+        self.depth_buffer = deque(maxlen=size)
 
         # Serial port setup
         try:
@@ -30,7 +39,6 @@ class SensorNode(Node):
 
         # Timer (~20 Hz)
         self.create_timer(0.01, self.timer_callback)
-        # Set logger level to WARN to suppress info logs during loop
         self.get_logger().set_level(rclpy.logging.LoggingSeverity.WARN)
 
     def timer_callback(self):
@@ -43,14 +51,23 @@ class SensorNode(Node):
             self.get_logger().warn(f"Expected 12 fields, got {len(parts)}: '{line}'")
             return
 
-        # Parse values
+        # Parse raw sensor values
         gx, gy, gz       = map(float, parts[0:3])
         ax, ay, az       = map(float, parts[3:6])
         roll, pitch, yaw = map(float, parts[6:9])
         p1, p2           = map(int,   parts[9:11])
-        pressureRaw            = float(parts[11])
-        depth            = (abs(pressureRaw*5/1024-0.483)*250)/9.81
+        pressureRaw      = float(parts[11])
 
+        # Convert raw pressure to voltage and depth (m)
+        voltage = pressureRaw * (5.0 / 1024.0)
+        depthRaw = (voltage - 0.483) / 0.25  # sensitivity 0.25 V/m
+
+        # Buffer converted depth and compute moving average
+        self.depth_buffer.append(depthRaw)
+        avg_depth = sum(self.depth_buffer) / len(self.depth_buffer)
+        # Clamp depth to >= 0
+        if avg_depth < 0.0:
+            avg_depth = 0.0
 
         now = self.get_clock().now().to_msg()
 
@@ -58,49 +75,43 @@ class SensorNode(Node):
         gyro_msg = Vector3Stamped()
         gyro_msg.header.stamp = now
         gyro_msg.header.frame_id = 'imu_link'
-        gyro_msg.vector.x = gx
-        gyro_msg.vector.y = gy
-        gyro_msg.vector.z = gz
+        gyro_msg.vector.x, gyro_msg.vector.y, gyro_msg.vector.z = gx, gy, gz
         self.gyro_pub.publish(gyro_msg)
 
         # Publish accel
         accel_msg = Vector3Stamped()
         accel_msg.header.stamp = now
         accel_msg.header.frame_id = 'imu_link'
-        accel_msg.vector.x = ax
-        accel_msg.vector.y = ay
-        accel_msg.vector.z = az
+        accel_msg.vector.x, accel_msg.vector.y, accel_msg.vector.z = ax, ay, az
         self.accel_pub.publish(accel_msg)
 
         # Publish euler
         euler_msg = Vector3Stamped()
         euler_msg.header.stamp = now
         euler_msg.header.frame_id = 'imu_link'
-        euler_msg.vector.x = roll
-        euler_msg.vector.y = pitch
-        euler_msg.vector.z = yaw
+        euler_msg.vector.x, euler_msg.vector.y, euler_msg.vector.z = roll, pitch, yaw
         self.euler_pub.publish(euler_msg)
 
         # Publish proximity
         self.p1_pub.publish(Int32(data=p1))
         self.p2_pub.publish(Int32(data=p2))
 
-        # Publish depth
-        self.depth_pub.publish(Float32(data=depth))
+        # Publish averaged/clamped depth
+        self.depth_pub.publish(Float32(data=avg_depth))
 
-        # Single-line console output with fixed-width fields
+        # Console log: gyro, accel, euler, proxi1, proxi2, depth
         log_line = (
             f"Gyro: {gx:7.2f} {gy:7.2f} {gz:7.2f} | "
             f"Acc : {ax:7.2f} {ay:7.2f} {az:7.2f} | "
             f"Ang : {roll:7.2f} {pitch:7.2f} {yaw:7.2f} | "
             f"P1:{p1:3d} P2:{p2:3d} | "
-            f"D :{depth:4.1f}"
+            f"D :{avg_depth:4.2f}"
         )
         sys.stdout.write('\r' + log_line)
         sys.stdout.flush()
 
     def destroy_node(self):
-        if hasattr(self, 'ser'):
+        if hasattr(self, 'ser') and self.ser.is_open:
             self.ser.close()
         super().destroy_node()
 
