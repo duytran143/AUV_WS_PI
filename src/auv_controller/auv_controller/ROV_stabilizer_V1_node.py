@@ -36,11 +36,11 @@ class ROVStabilizerV1Node(Node):
 
         # --- Parameters (tune these) ---
         params = {
-            'kp_roll': 1.0, 'ki_roll': 0.0, 'kd_roll': 0.1,
-            'kp_pitch': 1.0, 'ki_pitch': 0.0, 'kd_pitch': 0.1,
-            'kp_yaw': 1.0, 'ki_yaw': 0.0, 'kd_yaw': 0.1,
-            'kp_depth': 2.0, 'ki_depth': 0.0, 'kd_depth': 0.2,
-            'control_rate': 20.0,
+            'kp_roll': 0.07, 'ki_roll': 0.0, 'kd_roll': 0.015,
+            'kp_pitch': 0.13, 'ki_pitch': 0.0, 'kd_pitch': 0.01,
+            'kp_yaw': 0.02, 'ki_yaw': 0.0, 'kd_yaw': 0.015,
+            'kp_depth': 0.0, 'ki_depth': 0.0, 'kd_depth': 0.0,
+            'control_rate': 50.0,
             'deadband_threshold': 0.1, 'slope_pos': 50.0, 'slope_neg': 50.0, 'pwm_zero': 1500.0
         }
         for name, default in params.items():

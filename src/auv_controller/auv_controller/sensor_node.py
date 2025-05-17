@@ -48,7 +48,9 @@ class SensorNode(Node):
         ax, ay, az       = map(float, parts[3:6])
         roll, pitch, yaw = map(float, parts[6:9])
         p1, p2           = map(int,   parts[9:11])
-        depth            = float(parts[11])
+        pressureRaw            = float(parts[11])
+        depth            = (abs(pressureRaw*5/1024-0.483)*250)/9.81
+
 
         now = self.get_clock().now().to_msg()
 
@@ -92,7 +94,7 @@ class SensorNode(Node):
             f"Acc : {ax:7.2f} {ay:7.2f} {az:7.2f} | "
             f"Ang : {roll:7.2f} {pitch:7.2f} {yaw:7.2f} | "
             f"P1:{p1:3d} P2:{p2:3d} | "
-            f"D :{depth:4.2f}"
+            f"D :{depth:4.1f}"
         )
         sys.stdout.write('\r' + log_line)
         sys.stdout.flush()
