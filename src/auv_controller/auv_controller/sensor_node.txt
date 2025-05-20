@@ -1,13 +1,4 @@
 #!/usr/bin/env python3
-"""
-ROS 2 node – **SensorNode**
-Reads IMU/proximity/depth from serial, publishes on ROS topics, logs to console,
-and additionally streams Euler angles, P1, P2, and depth via UDP.
-
-Original functionality (serial → ROS topics/log) is preserved; UDP sending
-is appended in each timer callback.
-"""
-
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Vector3Stamped
@@ -16,30 +7,25 @@ import serial
 import time
 import sys
 from collections import deque
-import socket
-
-# UDP configuration
-CLIENT_IP   = "192.168.2.1"   # Windows client IP
-SENSOR_PORT = 5003            # UDP port for sensor data
 
 class SensorNode(Node):
     def __init__(self):
         super().__init__('sensor_node')
         # Publishers
-        self.gyro_pub   = self.create_publisher(Vector3Stamped, 'gyro',      10)
-        self.accel_pub  = self.create_publisher(Vector3Stamped, 'accel',     10)
+        self.gyro_pub   = self.create_publisher(Vector3Stamped, 'gyro', 10)
+        self.accel_pub  = self.create_publisher(Vector3Stamped, 'accel', 10)
         self.euler_pub  = self.create_publisher(Vector3Stamped, 'imu/euler', 10)
-        self.p1_pub     = self.create_publisher(Int32,           'proximity1',10)
-        self.p2_pub     = self.create_publisher(Int32,           'proximity2',10)
-        self.depth_pub  = self.create_publisher(Float32,         'depth',     10)
+        self.p1_pub     = self.create_publisher(Int32, 'proximity1', 10)
+        self.p2_pub     = self.create_publisher(Int32, 'proximity2', 10)
+        self.depth_pub  = self.create_publisher(Float32, 'depth', 10)
 
-        # Depth moving-average buffer
-        self.declare_parameter('depth_filter_size', 3)
-        size = self.get_parameter('depth_filter_size').value
-        if size < 1:
-            self.get_logger().warn('depth_filter_size should be >=1; defaulting to 3')
-            size = 3
-        self.depth_buffer = deque(maxlen=size)
+        # Moving average window size for depth readings
+        # self.declare_parameter('depth_filter_size', 3)
+        # size = self.get_parameter('depth_filter_size').value
+        # if size < 1:
+        #     self.get_logger().warn('depth_filter_size should be >=1; defaulting to 5')
+        #     size = 5
+        # self.depth_buffer = deque(maxlen=size)
 
         # Serial port setup
         try:
@@ -51,17 +37,11 @@ class SensorNode(Node):
             rclpy.shutdown()
             return
 
-        # UDP socket setup
-        self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.udp_addr = (CLIENT_IP, SENSOR_PORT)
-
-        # Timer (~100 Hz)
+        # Timer (~20 Hz)
         self.create_timer(0.01, self.timer_callback)
-        # Suppress excessive log level
         self.get_logger().set_level(rclpy.logging.LoggingSeverity.WARN)
 
     def timer_callback(self):
-        # Read one line from serial
         line = self.ser.readline().decode('utf-8', errors='ignore').strip()
         if not line:
             return
@@ -71,62 +51,68 @@ class SensorNode(Node):
             self.get_logger().warn(f"Expected 12 fields, got {len(parts)}: '{line}'")
             return
 
-        # Parse raw values
+        # Parse raw sensor values
         gx, gy, gz       = map(float, parts[0:3])
         ax, ay, az       = map(float, parts[3:6])
         roll, pitch, yaw = map(float, parts[6:9])
         p1, p2           = map(int,   parts[9:11])
         pressureRaw      = float(parts[11])
 
-        # Pressure → voltage → depth (m)
-        voltage = pressureRaw * (5.0 / 1024.0)
-        depthRaw = (voltage - 0.483) / 0.25
-        self.depth_buffer.append(depthRaw)
-        avg_depth = max(0.0, sum(self.depth_buffer) / len(self.depth_buffer))
+        # Convert raw pressure to voltage and depth (m)
+        # voltage = pressureRaw * (5.0 / 1024.0)
+        # depthRaw = abs(voltage - 0.483) * 250  # sensitivity 0.25 V/m
+
+        # Buffer converted depth and compute moving average
+        # avg_depth = sum(self.depth_buffer) / len(self.depth_buffer)
+        avg_depth = pressureRaw - 98    
+        # Clamp depth to >= 0
+        if avg_depth < 0.0:
+            avg_depth = 0.0
 
         now = self.get_clock().now().to_msg()
 
-        # --- Publish on ROS topics ---
-        gyro_msg = Vector3Stamped();  gyro_msg.header.stamp = now; gyro_msg.header.frame_id = 'imu_link'
+        # Publish gyro
+        gyro_msg = Vector3Stamped()
+        gyro_msg.header.stamp = now
+        gyro_msg.header.frame_id = 'imu_link'
         gyro_msg.vector.x, gyro_msg.vector.y, gyro_msg.vector.z = gx, gy, gz
         self.gyro_pub.publish(gyro_msg)
 
-        accel_msg = Vector3Stamped(); accel_msg.header.stamp = now; accel_msg.header.frame_id = 'imu_link'
+        # Publish accel
+        accel_msg = Vector3Stamped()
+        accel_msg.header.stamp = now
+        accel_msg.header.frame_id = 'imu_link'
         accel_msg.vector.x, accel_msg.vector.y, accel_msg.vector.z = ax, ay, az
         self.accel_pub.publish(accel_msg)
 
-        euler_msg = Vector3Stamped(); euler_msg.header.stamp = now; euler_msg.header.frame_id = 'imu_link'
+        # Publish euler
+        euler_msg = Vector3Stamped()
+        euler_msg.header.stamp = now
+        euler_msg.header.frame_id = 'imu_link'
         euler_msg.vector.x, euler_msg.vector.y, euler_msg.vector.z = roll, pitch, yaw
         self.euler_pub.publish(euler_msg)
 
+        # Publish proximity
         self.p1_pub.publish(Int32(data=p1))
         self.p2_pub.publish(Int32(data=p2))
+
+        # Publish averaged/clamped depth
         self.depth_pub.publish(Float32(data=avg_depth))
 
-        # --- Console log ---
+        # Console log: gyro, accel, euler, proxi1, proxi2, depth
         log_line = (
             f"Gyro: {gx:7.2f} {gy:7.2f} {gz:7.2f} | "
             f"Acc : {ax:7.2f} {ay:7.2f} {az:7.2f} | "
             f"Ang : {roll:7.2f} {pitch:7.2f} {yaw:7.2f} | "
             f"P1:{p1:3d} P2:{p2:3d} | "
-            f"D :{avg_depth:4.2f}"
+            f"D :{avg_depth:f}"
         )
         sys.stdout.write('\r' + log_line)
         sys.stdout.flush()
 
-        # --- UDP send ---
-        payload = f"{roll:.2f} {pitch:.2f} {yaw:.2f} {p1:d} {p2:d} {avg_depth:.2f}"
-        try:
-            self.udp_sock.sendto(payload.encode(), self.udp_addr)
-        except Exception as e:
-            self.get_logger().warn(f"UDP send error: {e}")
-
     def destroy_node(self):
-        # Close serial and UDP socket
         if hasattr(self, 'ser') and self.ser.is_open:
             self.ser.close()
-        if hasattr(self, 'udp_sock'):
-            self.udp_sock.close()
         super().destroy_node()
 
 

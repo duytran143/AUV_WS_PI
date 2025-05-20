@@ -12,18 +12,19 @@ import time
 RECONNECT_DELAY = 1.0  # seconds
 alphaX  = -15.0
 alphaY  = -15.0
-alphaVz = -10
+alphaVz = -10.0
 alphaD  = 0.1
 
 class JoystickInputNode(Node):
     def __init__(self):
         super().__init__('joystick_input_V2_node')
 
-        self.joy_pub = self.create_publisher(Joy, 'joy', 10)
-        self.sp_pub  = self.create_publisher(Vector3Stamped, 'setpoints', 10)
-        self.depth_pub = self.create_publisher(Float32, 'depth_sp', 10)
-        self.depth_sp = 0.0
+        self.joy_pub   = self.create_publisher(Joy,             'joy',      10)
+        self.sp_pub    = self.create_publisher(Vector3Stamped, 'setpoints',10)
+        self.depth_pub = self.create_publisher(Float32,         'depth_sp', 10)
+        self.depth_sp  = 0.0
 
+        # TCP server for joystick
         self.host = '0.0.0.0'
         self.port = 5000
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -52,50 +53,50 @@ class JoystickInputNode(Node):
     def receive_loop(self, conn):
         with conn:
             while rclpy.ok():
+                # Read raw data
                 try:
-                    data = conn.recv(1024).decode().strip()
-                    if not data:
+                    raw = conn.recv(1024).decode().strip()
+                    if not raw:
                         continue
                 except Exception as e:
                     self.get_logger().warn(f"Receive failed: {e}. Waiting for new connection.")
                     return
 
-                parts = data.split()
+                parts = raw.split()
                 if len(parts) < 8:
                     continue
+
+                # Parse axes
                 try:
                     axes = [float(v) for v in parts[:8]]
                 except ValueError:
                     continue
 
+                # Parse buttons (any extra parts)
                 buttons = []
-                if len(parts) == 9:
-                    raw = parts[8]
-                    for c in raw:
-                        if c in ('0', '1'):
-                            buttons.append(int(c))
-                else:
-                    try:
-                        buttons = [int(b) for b in parts[8:]]
-                    except ValueError:
-                        continue
+                try:
+                    for b in parts[8:]:
+                        buttons.append(int(b))
+                except ValueError:
+                    continue
 
                 # Publish Joy message
                 joy_msg = Joy()
                 joy_msg.header.stamp = self.get_clock().now().to_msg()
                 joy_msg.header.frame_id = 'joystick'
-                joy_msg.axes = axes
+                joy_msg.axes    = axes
                 joy_msg.buttons = buttons
                 self.joy_pub.publish(joy_msg)
 
-                # === Compute and publish setpoints ===
+                # Compute setpoints
                 Fy_sp = alphaY  * axes[0]
                 Fx_sp = alphaX  * axes[1]
                 Vz_sp = alphaVz * axes[2]
 
-                self.depth_sp += alphaD * axes[3]
-                self.depth_sp = min(max(self.depth_sp, 0), 98)
+                # Update depth setpoint and clamp as float
+                self.depth_sp = min(max(self.depth_sp + alphaD * axes[3], 0.0), 98.0)
 
+                # Publish setpoints
                 sp_msg = Vector3Stamped()
                 sp_msg.header.stamp = self.get_clock().now().to_msg()
                 sp_msg.header.frame_id = 'setpoint'
@@ -104,9 +105,12 @@ class JoystickInputNode(Node):
                 sp_msg.vector.z = Vz_sp
                 self.sp_pub.publish(sp_msg)
 
-                self.depth_pub.publish(Float32(data=self.depth_sp))
+                # Publish depth setpoint
+                depth_msg = Float32()
+                depth_msg.data = float(self.depth_sp)
+                self.depth_pub.publish(depth_msg)
 
-                # === Single-line log ===
+                # Single-line log
                 log_line = (
                     f"Fx: {Fx_sp:6.2f}  Fy: {Fy_sp:6.2f}  "
                     f"Vz: {Vz_sp:6.2f}  Depth_sp: {self.depth_sp:5.2f}"
@@ -132,7 +136,6 @@ def main(args=None):
     finally:
         node.destroy_node()
         rclpy.shutdown()
-
 
 if __name__ == '__main__':
     main()

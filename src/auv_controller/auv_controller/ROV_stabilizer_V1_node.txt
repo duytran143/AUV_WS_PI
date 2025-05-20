@@ -25,19 +25,11 @@ class PID:
         self.prev_error = 0.0
 
     def compute(self, error: float) -> float:
-        # Integrate error
         self.integral += error * self.dt
-        # Derivative (difference)
         derivative = (error - self.prev_error) / self.dt
-        # PID output
         output = self.kp * error + self.ki * self.integral + self.kd * derivative
-        # Store for next cycle
         self.prev_error = error
         return output
-
-    def reset_integral(self):
-        """Clear the integral term to avoid wind-up when switching modes."""
-        self.integral = 0.0
 
 
 class ROVStabilizerV1Node(Node):
@@ -46,20 +38,17 @@ class ROVStabilizerV1Node(Node):
 
         # --- Declare parameters (defaults) ---
         defaults = {
-            'kp_roll': 0.07,     'ki_roll': 0.0,    'kd_roll': 0.015,
-            'kp_pitch': 0.13,    'ki_pitch': 0.0,   'kd_pitch': 0.01,
-            'kp_yaw': 1,      'ki_yaw': 0.0,     'kd_yaw': 0.015,
-            'kp_depth': 0.0,     'ki_depth': 0.0,   'kd_depth': 0.0,
+            'kp_roll': 0.07, 'ki_roll': 0.0, 'kd_roll': 0.015,
+            'kp_pitch': 0.13, 'ki_pitch': 0.0, 'kd_pitch': 0.01,
+            'kp_yaw': 0.02, 'ki_yaw': 0.0, 'kd_yaw': 0.015,
+            'kp_depth': 1.1, 'ki_depth': 0.0, 'kd_depth': 0.05,
             'control_rate': 50.0,
-            'deadband_threshold': 0.1,
-            'slope_pos': 50.0,
-            'slope_neg': 50.0,
-            'pwm_zero': 1500.0
+            'deadband_threshold': 0.1, 'slope_pos': 50.0, 'slope_neg': 50.0, 'pwm_zero': 1500.0
         }
         for name, default in defaults.items():
             self.declare_parameter(name, default)
 
-        # Control loop rate and dt
+        # Timer / dt
         self.control_rate = self.get_parameter('control_rate').value
         self.dt = 1.0 / self.control_rate
 
@@ -89,114 +78,91 @@ class ROVStabilizerV1Node(Node):
             self.dt
         )
 
-        # Live parameter updates
+        # Subscribe to parameter changes for live tuning
         self.add_on_set_parameters_callback(self._on_parameter_update)
 
-        # Thruster allocation matrix and pseudoinverse
+        # --- Thruster allocation matrix A and pseudoinverse ---
         A = np.array([
-            [-0.707,   0.0,    0.0,   -0.707, -0.707,  0.0,    0.0,   -0.707],
-            [ 0.707,   0.0,    0.0,   -0.707, -0.707,  0.0,    0.0,    0.707],
-            [  0.0,    1.0,    1.0,    0.0,    0.0,    1.0,    1.0,    0.0 ],
-            [  0.0,   -0.14685,-0.14685,0.0,    0.0,    0.14685,0.14685,0.0 ],
-            [  0.0,    0.134, -0.134,  0.0,    0.0,    0.134, -0.134,  0.0 ],
-            [ 0.27975, 0.0,    0.0,    0.27975,-0.27975,0.0,    0.0,   -0.27975]
+            [-0.707,  0.0,    0.0,   -0.707, -0.707,  0.0,    0.0,   -0.707],
+            [ 0.707,  0.0,    0.0,   -0.707, -0.707,  0.0,    0.0,    0.707],
+            [  0.0,   1.0,    1.0,    0.0,    0.0,    1.0,    1.0,    0.0 ],
+            [  0.0,  -0.14685,-0.14685,0.0,    0.0,    0.14685,0.14685,0.0 ],
+            [  0.0,   0.134, -0.134,  0.0,    0.0,    0.134, -0.134,  0.0 ],
+            [ 0.27975,0.0,    0.0,    0.27975,-0.27975,0.0,    0.0,   -0.27975]
         ])
         self.A_pinv = np.linalg.pinv(A)
 
-        # State variables
-        self.roll = 0.0
-        self.pitch = 0.0
-        self.yaw_rate = 0.0
-        self.depth = 0.0
-        self.Fx_sp = 0.0
-        self.Fy_sp = 0.0
-        self.Vz_sp = 0.0
-        self.depth_sp = 0.0
+        # --- State and setpoints ---
+        self.roll = self.pitch = self.yaw_rate = self.depth = 0.0
+        self.Fx_sp = self.Fy_sp = self.Vz_sp = self.depth_sp = 0.0
 
-        # Subscribers
-        self.create_subscription(Vector3Stamped, '/imu/euler', self.euler_cb, 10)
-        self.create_subscription(Vector3Stamped, '/imu/gyro', self.gyro_cb, 10)
-        self.create_subscription(Float32, '/depth', self.depth_cb, 10)
+        # --- Subscribers ---
         self.create_subscription(Vector3Stamped, '/setpoints', self.setpoints_cb, 10)
         self.create_subscription(Float32, '/depth_sp', self.depth_sp_cb, 10)
+        self.create_subscription(Vector3Stamped, '/imu/euler', self.euler_cb, 10)
+        self.create_subscription(Vector3Stamped, '/gyro', self.gyro_cb, 10)
+        self.create_subscription(Float32, '/depth', self.depth_cb, 10)
 
-        # Publishers
+        # --- Publishers ---
         self.wrench_pub = self.create_publisher(WrenchStamped, '/wrench', 10)
         self.pwm_pub    = self.create_publisher(Float32MultiArray, '/PWM', 10)
 
-        # Timer for control loop
+        # Control loop timer
         self.timer = self.create_timer(self.dt, self.control_loop)
 
     def _on_parameter_update(self, params):
         for p in params:
-            if p.name == 'kp_roll':   self.pid_roll.kp   = p.value
-            elif p.name == 'ki_roll': self.pid_roll.ki   = p.value
-            elif p.name == 'kd_roll': self.pid_roll.kd   = p.value
-            elif p.name == 'kp_pitch':   self.pid_pitch.kp   = p.value
-            elif p.name == 'ki_pitch': self.pid_pitch.ki   = p.value
-            elif p.name == 'kd_pitch': self.pid_pitch.kd   = p.value
-            elif p.name == 'kp_yaw':   self.pid_yaw.kp   = p.value
-            elif p.name == 'ki_yaw': self.pid_yaw.ki   = p.value
-            elif p.name == 'kd_yaw': self.pid_yaw.kd   = p.value
-            elif p.name == 'kp_depth':   self.pid_depth.kp   = p.value
-            elif p.name == 'ki_depth': self.pid_depth.ki   = p.value
-            elif p.name == 'kd_depth': self.pid_depth.kd   = p.value
+            if p.name == 'kp_roll': self.pid_roll.kp = p.value
+            elif p.name == 'ki_roll': self.pid_roll.ki = p.value
+            elif p.name == 'kd_roll': self.pid_roll.kd = p.value
+            elif p.name == 'kp_pitch': self.pid_pitch.kp = p.value
+            elif p.name == 'ki_pitch': self.pid_pitch.ki = p.value
+            elif p.name == 'kd_pitch': self.pid_pitch.kd = p.value
+            elif p.name == 'kp_yaw': self.pid_yaw.kp = p.value
+            elif p.name == 'ki_yaw': self.pid_yaw.ki = p.value
+            elif p.name == 'kd_yaw': self.pid_yaw.kd = p.value
+            elif p.name == 'kp_depth': self.pid_depth.kp = p.value
+            elif p.name == 'ki_depth': self.pid_depth.ki = p.value
+            elif p.name == 'kd_depth': self.pid_depth.kd = p.value
+            # control_rate change not supported live here
         return SetParametersResult(successful=True)
 
     # ----- Callbacks -----
-    def setpoints_cb(self, msg: Vector3Stamped):
+    def setpoints_cb(self, msg):
         self.Fx_sp, self.Fy_sp, self.Vz_sp = msg.vector.x, msg.vector.y, msg.vector.z
 
-    def depth_sp_cb(self, msg: Float32):
+    def depth_sp_cb(self, msg):
         self.depth_sp = msg.data
 
-    def euler_cb(self, msg: Vector3Stamped):
+    def euler_cb(self, msg):
         self.roll, self.pitch = msg.vector.x, msg.vector.y
 
-    def gyro_cb(self, msg: Vector3Stamped):
+    def gyro_cb(self, msg):
         self.yaw_rate = msg.vector.z
 
-    def depth_cb(self, msg: Float32):
+    def depth_cb(self, msg):
         self.depth = msg.data
 
     # ----- Control loop -----
     def control_loop(self):
-        # Errors for roll and pitch
         e_roll = -self.roll
         e_pitch = -self.pitch
+        e_yaw = self.Vz_sp - self.yaw_rate
         e_depth = self.depth_sp - self.depth
 
-        # Compute roll & pitch moments
         Mx = self.pid_roll.compute(e_roll)
         My = self.pid_pitch.compute(e_pitch)
-
-        # Yaw control: open-loop if user commanding, else PID to hold zero rate
-        if self.Vz_sp != 0.0:
-            # direct open-loop yaw input (scale 1:1)
-            Mz = self.Vz_sp
-            # clear integral history to avoid wind-up when switching back
-            self.pid_yaw.reset_integral()
-        else:
-            # PID to drive yaw rate to zero
-            e_yaw = 0.0 - self.yaw_rate
-            Mz = self.pid_yaw.compute(e_yaw)
-
-        # Depth control
+        Mz = self.pid_yaw.compute(e_yaw)
         Fz = self.pid_depth.compute(e_depth)
 
-        # Surge & sway from setpoints
         Fx, Fy = self.Fx_sp, self.Fy_sp
-
-        # Build wrench vector [Fx, Fy, Fz, Mx, My, Mz]
         wrench = np.array([[Fx], [Fy], [Fz], [Mx], [My], [Mz]])
-        # Allocate forces to 8 thrusters
         forces = self.A_pinv @ wrench
 
-        # Convert to PWM signals
-        deadband    = self.get_parameter('deadband_threshold').value
-        slope_pos   = self.get_parameter('slope_pos').value
-        slope_neg   = self.get_parameter('slope_neg').value
-        pwm_zero    = self.get_parameter('pwm_zero').value
+        deadband = self.get_parameter('deadband_threshold').value
+        slope_pos = self.get_parameter('slope_pos').value
+        slope_neg = self.get_parameter('slope_neg').value
+        pwm_zero = self.get_parameter('pwm_zero').value
 
         pwm_vals = []
         for f in forces.flatten():
@@ -206,22 +172,18 @@ class ROVStabilizerV1Node(Node):
                 pwm = pwm_zero + slope_pos * f
             else:
                 pwm = pwm_zero - slope_neg * abs(f)
-            # clip to safe range
             pwm = max(1200.0, min(1800.0, pwm))
             pwm_vals.append(int(pwm))
 
-        # Publish wrench for debugging
         ws = WrenchStamped()
         ws.header.stamp = self.get_clock().now().to_msg()
         ws.wrench.force.x, ws.wrench.force.y, ws.wrench.force.z = Fx, Fy, Fz
         ws.wrench.torque.x, ws.wrench.torque.y, ws.wrench.torque.z = Mx, My, Mz
         self.wrench_pub.publish(ws)
 
-        # Publish PWM array
-        pwm_msg = Float32MultiArray(data=pwm_vals)
-        self.pwm_pub.publish(pwm_msg)
+        arr = Float32MultiArray(data=[float(p) for p in pwm_vals])
+        self.pwm_pub.publish(arr)
 
-        # Log to console
         log_line = ' '.join(str(p) for p in pwm_vals)
         sys.stdout.write('\r' + log_line)
         sys.stdout.flush()

@@ -40,6 +40,7 @@ def generate_launch_description():
         emulate_tty=False,
     )
 
+
     return LaunchDescription([
         # Launch sensor first
         sensor_node,
