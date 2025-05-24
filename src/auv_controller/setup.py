@@ -22,16 +22,13 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'joystick_input_node = auv_controller.joystick_input_node:main',
             'sensor_node = auv_controller.sensor_node:main',
-            'command_processor_node = auv_controller.command_processor_node:main',
             'camera_stream_node     = auv_controller.camera_stream_node:main',
             'gui_command_node     = auv_controller.gui_command_node:main',
-            'XY_stabilizer_node   = auv_controller.XY_stabilizer_node:main',
-            'velocity_estimator_node = auv_controller.velocity_estimator_node:main',
-            'RPH_stabilizer_node  = auv_controller.RPH_stabilizer_node:main',
-            'joystick_input_V2_node = auv_controller.joystick_input_V2_node:main',
-            'ROV_stabilizer_V1_node = auv_controller.ROV_stabilizer_V1_node:main',
+            'user_input = auv_controller.user_input:main',
+            'user_input_temp = auv_controller.user_input_temp:main',
+            'ROV_main = auv_controller.ROV_main:main',
+            'ROV_main_temp = auv_controller.ROV_main_temp:main',
             'motor_driver_node = auv_controller.motor_driver_node:main'
         ],
     },

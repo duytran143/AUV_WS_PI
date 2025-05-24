@@ -76,13 +76,7 @@ class SensorNode(Node):
         ax, ay, az       = map(float, parts[3:6])
         roll, pitch, yaw = map(float, parts[6:9])
         p1, p2           = map(int,   parts[9:11])
-        pressureRaw      = float(parts[11])
-
-        # Pressure → voltage → depth (m)
-        voltage = pressureRaw * (5.0 / 1024.0)
-        depthRaw = (voltage - 0.483) / 0.25
-        self.depth_buffer.append(depthRaw)
-        avg_depth = max(0.0, sum(self.depth_buffer) / len(self.depth_buffer))
+        depth     = float(parts[11])
 
         now = self.get_clock().now().to_msg()
 
@@ -101,7 +95,7 @@ class SensorNode(Node):
 
         self.p1_pub.publish(Int32(data=p1))
         self.p2_pub.publish(Int32(data=p2))
-        self.depth_pub.publish(Float32(data=avg_depth))
+        self.depth_pub.publish(Float32(data=depth))
 
         # --- Console log ---
         log_line = (
@@ -109,13 +103,13 @@ class SensorNode(Node):
             f"Acc : {ax:7.2f} {ay:7.2f} {az:7.2f} | "
             f"Ang : {roll:7.2f} {pitch:7.2f} {yaw:7.2f} | "
             f"P1:{p1:3d} P2:{p2:3d} | "
-            f"D :{avg_depth:4.2f}"
+            f"D :{depth:4.2f}"
         )
         sys.stdout.write('\r' + log_line)
         sys.stdout.flush()
 
         # --- UDP send ---
-        payload = f"{roll:.2f} {pitch:.2f} {yaw:.2f} {p1:d} {p2:d} {avg_depth:.2f}"
+        payload = f"{roll:.2f} {pitch:.2f} {yaw:.2f} {p1:d} {p2:d} {depth:.2f}"
         try:
             self.udp_sock.sendto(payload.encode(), self.udp_addr)
         except Exception as e:
